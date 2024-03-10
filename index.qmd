@@ -1,0 +1,176 @@
+---
+title: "SCV Data Scraping"
+subtitle: "Test de scraping de données sur les données de Serre Chevalier Vallée"
+title-block-banner: true
+date: 2024-02-10
+format: html
+editor_options: 
+  chunk_output_type: console
+execute:
+  message: false
+  warning: false
+---
+
+:::{.callout-note}
+## Objectifs
+- Tester le package `httr2`
+- Scraper les données de SCV pour les pistes de ski
+:::
+
+## Packages
+
+```{r}
+library(httr2)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggiraph)
+```
+
+## Data scraping
+
+```{r request}
+url_scv <- "https://lumiplay.link/interactive-map-services/public/map/2bdde7f1-a9d2-4cff-a3df-11fc4945f334/staticPoiData?lang=fr"
+
+raw_json <- 
+  httr2::request(url_scv) %>% 
+  httr2::req_perform() %>% 
+  httr2::resp_body_json()
+```
+
+## Data manipulation
+
+```{r tidydata}
+#| echo: true
+df_SCV <- data.frame()
+
+for(i in 1:length(raw_json$items)){
+  df_SCV <-
+    data.frame(
+      names = raw_json[["items"]][[i]][["data"]] %>% 
+        unlist() %>% 
+        names() %>% 
+        as.vector(), 
+      value = raw_json[["items"]][[i]][["data"]] %>% 
+        unlist() %>% 
+        dplyr::as_tibble()
+    ) %>% 
+    dplyr::mutate(id_piste = raw_json[["items"]][[i]][["data"]]$id) %>% 
+    dplyr::bind_rows(df_SCV)
+}
+
+id_piste <- 
+  df_SCV %>% 
+  dplyr::filter(names != 'id') %>%
+  dplyr::filter(value == "DOWNHILL_SKIING") %>% 
+  dplyr::pull(id_piste)
+
+df_SCV_final <-
+  df_SCV %>% 
+  dplyr::filter(names != 'id') %>%
+  dplyr::filter(id_piste %in% id_piste) %>%
+  dplyr::filter(names %in% c("name", "trailLevel","length", "departureAltitude", "arrivalAltitude")) %>% 
+  tidyr::pivot_wider(names_from = names, values_from = value) %>% 
+  dplyr::filter(length != 'NULL') %>% 
+  dplyr::mutate(length = as.numeric(length),
+         departureAltitude = as.numeric(departureAltitude),
+         arrivalAltitude = as.numeric(arrivalAltitude),
+         diff_altitude = departureAltitude - arrivalAltitude) %>% 
+  dplyr::filter(trailLevel != 'NULL') %>% 
+  dplyr::mutate(trailLevel = factor(as.character(trailLevel), 
+                                    ordered = TRUE, 
+                                    levels = c("GREEN", "BLUE", "RED", "BLACK")),
+                name = as.character(name))
+```
+
+## Data visualization
+
+```{r}
+plot1 <-
+df_SCV_final %>% 
+  ggplot(data = .) +
+  aes(x = trailLevel, y = length, fill = trailLevel) +
+  geom_violin(
+    adjust = 1,
+    alpha = 0.5
+  ) +
+  geom_boxplot(width=0.1, alpha = 0.5) +
+  stat_summary(fun=mean, geom="point", shape=23, size=3.5) +
+  scale_fill_manual(values = c("GREEN" = "#218559", 
+                               "BLUE" = "#06A2CB", 
+                               "RED" = "#DD1E2F", 
+                               "BLACK" = "#192823")) +
+  theme_bw()
+
+plot1
+```
+
+```{r}
+plot2 <-
+df_SCV_final %>% 
+  ggplot(data = .) +
+  aes(x = length, y = diff_altitude, fill = trailLevel) +
+  geom_point(shape = 21, size = 3, alpha = 0.7) +
+  scale_fill_manual(values = c("GREEN" = "#218559", 
+                               "BLUE" = "#06A2CB", 
+                               "RED" = "#DD1E2F", 
+                               "BLACK" = "#192823")) +
+  ggrepel::geom_label_repel(data = . %>% dplyr::filter(stringr::str_detect(name, "MICKEY")), 
+                           aes(label = stringr::str_wrap(name,18)), size = 2.8, alpha = 0.9, fill = "white", 
+                           # add arrow
+                           segment.color = "grey10",
+                           # increase distance text arrow
+                           min.segment.length = 0.1,
+                           box.padding = 3,
+                           direction = "x",
+                           # bold
+                           fontface = "italic"
+                           ) +
+  labs(title = "Slope proxy vs. Trail length",
+       x = "Trail length (m)",
+       y = "Difference in altitude between departure and arrival (m)") +
+  theme_bw()
+
+plot2
+```
+
+```{r ggiraph_plot}
+
+## ggiraph version
+plot2_interactive <-
+  df_SCV_final %>% 
+  mutate(label_text = paste0(
+    "<strong>", name, "</strong><br>",
+    "Trail level: ", trailLevel, "<br>",
+    "Trail length: ", length, "m<br>",
+    "Departure/arrival diffence: ", diff_altitude, "m"
+  )
+           ) %>% 
+  ggplot(data = .) +
+  aes(x = length, y = diff_altitude, fill = trailLevel, 
+      tooltip = label_text, dataid = id_piste, 
+      group = trailLevel,
+      color = trailLevel) +
+  geom_point_interactive(shape = 21, 
+                         size = 3, 
+                         alpha = 0.7, 
+                         color = 'black') +
+  geom_smooth(method = "lm", se = FALSE,
+      size = 0.8,
+      linetype = "dashed") +
+  scale_fill_manual(values = c("GREEN" = "#218559", 
+                               "BLUE" = "#06A2CB", 
+                               "RED" = "#DD1E2F", 
+                               "BLACK" = "#192823")) +
+  scale_color_manual(values = c("GREEN" = "#218559", 
+                               "BLUE" = "#06A2CB", 
+                               "RED" = "#DD1E2F", 
+                               "BLACK" = "#192823")) +
+  labs(title = "Slope proxy vs. Trail length",
+       x = "Trail length (m)",
+       y = "Difference in altitude between departure and arrival (m)") +
+  theme_bw()
+ 
+girafe(ggobj = plot2_interactive)
+```
+
